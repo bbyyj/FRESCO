@@ -1,22 +1,23 @@
 # data
 file_path: './data/boxer-punching-towards-camera.mp4'
-save_path: './output/boxer-punching-towards-camera/'
+save_path: './boxer/019/'
 mininterv: 2 # for keyframe selection
 maxinterv: 2 # for keyframe selection
 
 # diffusion
 seed: 0
-prompt: 'An African American boxer wearing black boxing gloves punches towards the camera, cartoon style'
+#prompt: 'An African American boxer wearing black boxing gloves punches towards the camera,  and behind him is another boxer in a red vest with his back to him, cartoon style'
+prompt: 'An Asian female singer with long black hair, wearing a short pink skirt, her hands in two fists, a purple microphone in her left hand and nothing in her right hand, sang and danced on a brightly lit stage with lights and screens in the background'
 sd_path: 'stablediffusionapi/flat-2d-animerge' 
-use_controlnet: True
+use_controlnet: False
 controlnet_type: 'depth'  # 'hed', 'canny'
 cond_scale: 0.7
-use_freeu: False
+use_freeu: True
 
 # video-to-video translation 
 batch_size: 8
 num_inference_steps: 20
-num_warmup_steps: 5
+num_warmup_steps: -1
 end_opt_step: 15
 run_ebsynth: False
 max_process: 4
@@ -24,4 +25,4 @@ max_process: 4
 # supporting model
 gmflow_path: './model/gmflow_sintel-0c07dcb3.pth'
 sod_path: './model/epoch_resnet.pth'
-use_salinecy: True
+use_salinecy: False

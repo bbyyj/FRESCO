@@ -142,9 +142,12 @@ def run_keyframe_translation(config):
     os.makedirs(config['save_path']+'keys', exist_ok=True)
     os.makedirs(config['save_path']+'video', exist_ok=True)
     
-    sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
-    sublists[0].insert(0, keys[0])
-    sublists[0].insert(1, keys[1])
+    #sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
+    #sublists[0].insert(0, keys[0])
+    #sublists[0].insert(1, keys[1])
+    #sublists = [[30,0,5,10,15,20,25,35],[40,45,50,55,60],[65,70,75]]
+    sublists = [[0,2,4,6,8,10,12,14],[16,18,20,22,24],[26,28,30]]
+    '''''
     if len(sublists) > 1 and len(sublists[-1]) < 3:
         add_num = 3 - len(sublists[-1])
         sublists[-1] = sublists[-2][-add_num:] + sublists[-1]
@@ -152,7 +155,7 @@ def run_keyframe_translation(config):
 
     if not sublists[-2]:
         del sublists[-2]
-        
+    '''''
     print('processing %d batches:\nkeyframe indexes'%(len(sublists)), sublists)    
 
     print('\n' + '=' * 100)
@@ -163,7 +166,15 @@ def run_keyframe_translation(config):
     imgs = []
     record_latents = []
     video_cap = cv2.VideoCapture(config['file_path'])
-    for i in range(frame_num):
+    frame_indices = list(range(frame_num))
+    #frame_indices.reverse()
+    # 将第 45 帧移动到第一个位置，其余帧保持原顺序
+    #frame_indices.remove(45)  # 删除第 45 帧
+    #frame_indices.remove(30)
+    #frame_indices.remove(2)
+    #frame_indices = [2] + frame_indices  # 将第 45 帧插入到第一个位置
+    for i in frame_indices:
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, i)  # 设置读取的帧号为 i
         # prepare a batch of frame based on sublists
         success, frame = video_cap.read()
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -178,7 +189,7 @@ def run_keyframe_translation(config):
             continue
         
         print('processing batch [%d/%d] with %d frames'%(batch_ind+1, len(sublists), len(sublists[batch_ind])))
-        
+        print(sublists[batch_ind])
         # prepare input
         batch_size = len(imgs)
         n_prompts = [n_prompt] * len(imgs)
@@ -207,7 +218,7 @@ def run_keyframe_translation(config):
             saliency = None
         
         # prepare parameters for inter-frame and intra-frame consistency
-        flows, occs, attn_mask, interattn_paras = get_flow_and_interframe_paras(flow_model, imgs)
+        flows, occs, attn_mask,interattn_paras,mask = get_flow_and_interframe_paras(flow_model, imgs)
         correlation_matrix = get_intraframe_paras(pipe, imgs_torch, frescoProc, 
                             prompt_embeds, seed = config['seed'])
     
@@ -228,21 +239,25 @@ def run_keyframe_translation(config):
         * Turn off background smoothing: set saliency = None in apply_FRESCO_opt()
         '''    
         # Turn on all FRESCO support
-        frescoProc.controller.enable_controller(interattn_paras=interattn_paras, attn_mask=attn_mask)
-        apply_FRESCO_opt(pipe, steps = timesteps[:config['end_opt_step']],
-                         flows = flows, occs = occs, correlation_matrix=correlation_matrix, 
-                         saliency=saliency, optimize_temporal = True)
+        #frescoProc.controller.enable_controller(interattn_paras=interattn_paras, attn_mask=attn_mask)
+        frescoProc.controller.disable_controller()
+        #frescoProc.controller.enable_interattn(interattn_paras)
+        #frescoProc.controller.enable_intraattn()
+        frescoProc.controller.enable_cfattn(attn_mask)
+        disable_FRESCO_opt(pipe)
+        #apply_FRESCO_opt(pipe, steps = timesteps[:config['end_opt_step']],
+        #                flows = flows, occs = occs, correlation_matrix=[], 
+        #                saliency=saliency, optimize_temporal = True)
         
         gc.collect()
         torch.cuda.empty_cache()   
-        
         # run!
         latents = inference(pipe, controlnet, frescoProc, 
                   imgs_torch, prompt_embeds, edges, timesteps,
                   cond_scale, config['num_inference_steps'], config['num_warmup_steps'], 
                   do_classifier_free_guidance, config['seed'], guidance_scale, config['use_controlnet'],         
                   record_latents, propagation_mode,
-                  flows = flows, occs = occs, saliency=saliency, repeat_noise=True)
+                  flows = flows, occs = occs, saliency=saliency, repeat_noise=True,mask=mask)
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -260,8 +275,8 @@ def run_keyframe_translation(config):
         
         batch_ind += 1
         # current batch uses the last frame of the previous batch as ref
-        ref_prompt= [prompts[0], prompts[-1]]
-        imgs = [imgs[0], imgs[-1]]
+        ref_prompt= [prompts[0],prompts[-1]]
+        imgs = [imgs[0],imgs[-1]]
         propagation_mode = batch_ind > 0
         if batch_ind == len(sublists):
             gc.collect()

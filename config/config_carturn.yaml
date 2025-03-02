@@ -1,6 +1,6 @@
 # data
 file_path: './data/car-turn.mp4'
-save_path: './output/car-turn/'
+save_path: './new_output/car-turn-027/'
 mininterv: 5 # for keyframe selection
 maxinterv: 5 # for keyframe selection
 

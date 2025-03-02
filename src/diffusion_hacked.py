@@ -40,6 +40,7 @@ class AttentionControl():
         self.intraattn_bias = 0
         self.intraattn_scale_factor = 0.2
         self.interattn_scale_factor = 0.2
+        self.bwd_flows_all=None
     
     @staticmethod
     def get_empty_store():
@@ -78,12 +79,16 @@ class AttentionControl():
         self.use_cfattn = False        
 
     # cross frame attention
-    def enable_cfattn(self, attn_mask=None):
+    def enable_cfattn(self, attn_mask=None,bwd_flows_all=None):
         if attn_mask:
             if self.attn_mask:
                 del self.attn_mask
                 torch.cuda.empty_cache()
+            if self.bwd_flows_all:
+                del self.bwd_flows_all
+                torch.cuda.empty_cache()
             self.attn_mask = attn_mask
+            self.bwd_flows_all=bwd_flows_all
             self.use_cfattn = True  
         else:
             if self.attn_mask:
@@ -184,6 +189,7 @@ class FRESCOAttnProcessor2_0:
         if input_ndim == 4:
             batch_size, channel, height, width = hidden_states.shape
             hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+            #print('187.hidden_states.shape: batch_size, channel, height * width=', batch_size, channel, height * width)
 
         batch_size, sequence_length, _ = (
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
@@ -199,6 +205,8 @@ class FRESCOAttnProcessor2_0:
             hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
         query = attn.to_q(hidden_states)
+        #print('204.query.shape: ', query.shape)
+        #print('204.hidden_states.shape: ',hidden_states.shape)
 
         crossattn = False
         if encoder_hidden_states is None:
@@ -211,8 +219,10 @@ class FRESCOAttnProcessor2_0:
                 encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
             
         # BC * HW * 8D
-        key = attn.to_k(encoder_hidden_states)
+        key = attn.to_k(encoder_hidden_states) 
+        #print('218.key.shape: ', key.shape)
         value = attn.to_v(encoder_hidden_states)
+        #print('220.value.shape: ', value.shape)
         
         query_raw, key_raw = None, None
         if self.controller and self.controller.use_interattn and (not crossattn):
@@ -220,23 +230,59 @@ class FRESCOAttnProcessor2_0:
 
         inner_dim = key.shape[-1] # 8D
         head_dim = inner_dim // attn.heads # D
+
+        print("self.controller.use_cfattn: ",self.controller.use_cfattn)
+        print("crossattn: ",crossattn)
         
         '''for efficient cross-frame attention'''
         if self.controller and self.controller.use_cfattn and (not crossattn):
             video_length = key.size()[0] // self.unet_chunk_size
             former_frame_index = [0] * video_length
-            attn_mask = None
+            attn_mask = []
+            bwd_flows = []
+            '''''
+            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
+            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
+            key=key[:,0] # the first frame
+            value=value[:,0]
+            key = repeat(key, "b d c -> b f d c", f=video_length)
+            value = repeat(value, "b d c -> b f d c", f=video_length)
+            value = rearrange(value, "b f d c -> (b f) d c").detach()
+            key = rearrange(key, "b f d c -> (b f) d c").detach()
+            '''''
+            
+            '''''
+            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
+            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
+            key_0=key[:,0] # the first frame
+            value_0=value[:,0]
+            key_0 = repeat(key_0, "b d c -> b f d c", f=video_length)
+            value_0 = repeat(value_0, "b d c -> b f d c", f=video_length)
+            key_stacked = torch.cat([key_0, key], dim=2)
+            value_stacked= torch.cat([value_0,value],dim=2)
+            value = rearrange(value_stacked, "b f d c -> (b f) d c").detach()
+            key = rearrange(key_stacked, "b f d c -> (b f) d c").detach()
+            '''''
+            
+
+            
             if self.controller.attn_mask is not None:
                 for m in self.controller.attn_mask:
+                    print('236.m.shape: ', m.shape)
                     if m.shape[1] == key.shape[1]:
                         attn_mask = m
             # BC * HW * 8D --> B * C * HW * 8D
             key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
+            print('241.key.shape: ', key.shape)
+            print('242.attn_mask.shape: ', attn_mask.shape)
             # B * C * HW * 8D --> B * C * HW * 8D
             if attn_mask is None:
                 key = key[:, former_frame_index]
             else:
-                key = repeat(key[:, attn_mask], "b d c -> b f d c", f=video_length)
+                key=key[:, attn_mask]
+                print('248.key.shape: ', key.shape)
+                key = repeat(key, "b d c -> b f d c", f=video_length)
+                print('250.key.shape: ', key.shape)
             # B * C * HW * 8D --> BC * HW * 8D 
             key = rearrange(key, "b f d c -> (b f) d c").detach()
             value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
@@ -245,6 +291,7 @@ class FRESCOAttnProcessor2_0:
             else:
                 value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length)              
             value = rearrange(value, "b f d c -> (b f) d c").detach()
+            
         
         # BC * HW * 8D --> BC * HW * 8 * D --> BC * 8 * HW * D
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
@@ -369,7 +416,7 @@ class FRESCOAttnProcessor2_0:
             
         # BC * 8 * HW * D --> BC * HW * 8D
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
+        hidden_states = hidden_states.to(query.dtype) 
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
@@ -386,6 +433,29 @@ class FRESCOAttnProcessor2_0:
 
         return hidden_states
 
+'''
+            print("237.query.shape: ",query.shape)
+            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
+            key=key[:,0]
+            key=repeat(key, "b d c -> b f d c", f=video_length)
+            key = rearrange(key, "b f d c -> (b f) d c", f=video_length)
+            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
+            value=value[:,0]
+            value=repeat(value, "b d c -> b f d c", f=video_length)
+            value = rearrange(value, "b f d c -> (b f) d c", f=video_length)
+            
+            
+            
+            print("246.key.shape: ",key.shape)
+        print("247.key.shape: ",key.shape)
+        print("248.query.shape: ",query.shape)
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+'''
 
 def apply_FRESCO_attn(pipe):
     """
@@ -697,7 +767,9 @@ def my_forward(self, steps = [], layers = [0,1,2,3], flows = None, occs = None,
             image_embeds = added_cond_kwargs.get("image_embeds")
             encoder_hidden_states = self.encoder_hid_proj(image_embeds)
         # 2. pre-process
+        #print("1、sample.shape:", sample.shape)
         sample = self.conv_in(sample)
+        #print("pre-process后的sample.shape:", sample.shape)
 
         # 3. down
 
@@ -721,6 +793,7 @@ def my_forward(self, steps = [], layers = [0,1,2,3], flows = None, occs = None,
                     encoder_attention_mask=encoder_attention_mask,
                     **additional_residuals,
                 )
+                #print("down后的sample.shape:", sample.shape)
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
 
@@ -749,6 +822,7 @@ def my_forward(self, steps = [], layers = [0,1,2,3], flows = None, occs = None,
                 cross_attention_kwargs=cross_attention_kwargs,
                 encoder_attention_mask=encoder_attention_mask,
             )
+            #print("middle后的sample.shape:", sample.shape)
 
         if is_controlnet:
             sample = sample + mid_block_additional_residual
@@ -794,6 +868,7 @@ def my_forward(self, steps = [], layers = [0,1,2,3], flows = None, occs = None,
                     attention_mask=attention_mask,
                     encoder_attention_mask=encoder_attention_mask,
                 )
+                #print("up后的sample.shape:", sample.shape)
             else:
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
@@ -817,7 +892,7 @@ def my_forward(self, steps = [], layers = [0,1,2,3], flows = None, occs = None,
 
 
 def apply_FRESCO_opt(pipe, steps = [], layers = [0,1,2,3], flows = None, occs = None, 
-               correlation_matrix=[], intra_weight = 1e2, iters=20, optimize_temporal = True, saliency = None):
+               correlation_matrix=[], intra_weight = 1e2, iters=20, optimize_temporal = False, saliency = None):
     """
     Apply FRESCO-based optimization to a StableDiffusionPipeline
     """  
@@ -900,7 +975,6 @@ def get_intraframe_paras(pipe, imgs, frescoProc,
 
     return correlation_matrix
 
-
 @torch.no_grad()
 def get_flow_and_interframe_paras(flow_model, imgs, visualize_pipeline=False):
     """
@@ -910,7 +984,64 @@ def get_flow_and_interframe_paras(flow_model, imgs, visualize_pipeline=False):
     """
     images = torch.stack([torch.from_numpy(img).permute(2, 0, 1).float() for img in imgs], dim=0).cuda()
     imgs_torch = torch.cat([numpy2tensor(img) for img in imgs], dim=0)
+    reshuffle_list = list(range(1,len(images)))+[0]
     
+    results_dict = flow_model(images, images[reshuffle_list], attn_splits_list=[2], 
+                              corr_radius_list=[-1], prop_radius_list=[-1], pred_bidir_flow=True)
+    flow_pr = results_dict['flow_preds'][-1]  # [2*B, 2, H, W]
+    fwd_flows, bwd_flows = flow_pr.chunk(2)   # [B, 2, H, W]
+    fwd_occs, bwd_occs = forward_backward_consistency_check(fwd_flows, bwd_flows) # [B, H, W]
+    
+    warped_image1 = flow_warp(images, bwd_flows)
+    bwd_occs = torch.clamp(bwd_occs + (abs(images[reshuffle_list]-warped_image1).mean(dim=1)>255*0.25).float(), 0 ,1)
+    
+    warped_image2 = flow_warp(images[reshuffle_list], fwd_flows)
+    fwd_occs = torch.clamp(fwd_occs + (abs(images-warped_image2).mean(dim=1)>255*0.25).float(), 0 ,1)    
+    
+    if visualize_pipeline:
+        print('visualized occlusion masks based on optical flows')
+        viz = torchvision.utils.make_grid(imgs_torch * (1-fwd_occs.unsqueeze(1)), len(images), 1)
+        visualize(viz.cpu(), 90)
+        viz = torchvision.utils.make_grid(imgs_torch[reshuffle_list] * (1-bwd_occs.unsqueeze(1)), len(images), 1)
+        visualize(viz.cpu(), 90) 
+        
+    attn_mask = []
+    
+    mask = bwd_occs < 0.5
+
+    for scale in [8.0, 16.0, 32.0]:
+        bwd_occs_ = F.interpolate(bwd_occs[:-1].unsqueeze(1), scale_factor=1./scale, mode='bilinear')
+        attn_mask += [torch.cat((bwd_occs_[0:1].reshape(1,-1)>-1, bwd_occs_.reshape(bwd_occs_.shape[0],-1)>0.5), dim=0)]   
+        
+
+        
+    fwd_mappings = []
+    bwd_mappings = []
+    interattn_masks = []
+    for scale in [8.0, 16.0]:
+        fwd_mapping, bwd_mapping, interattn_mask = get_mapping_ind(bwd_flows, bwd_occs, imgs_torch, scale=scale)
+        fwd_mappings += [fwd_mapping]
+        bwd_mappings += [bwd_mapping]
+        interattn_masks += [interattn_mask]  
+    
+    interattn_paras = {}
+    interattn_paras['fwd_mappings'] = fwd_mappings
+    interattn_paras['bwd_mappings'] = bwd_mappings
+    interattn_paras['interattn_masks'] = interattn_masks
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return [fwd_flows, bwd_flows], [fwd_occs, bwd_occs], attn_mask, interattn_paras,mask
+'''''
+@torch.no_grad()
+def get_flow_and_interframe_paras(flow_model, imgs, visualize_pipeline=False):
+    """
+    Get parameters for temporal-guided attention and optimization
+    * predict optical flow and occlusion mask
+    * compute pixel index correspondence for FLATTEN
+    """
+    images = torch.stack([torch.from_numpy(img).permute(2, 0, 1).float() for img in imgs], dim=0).cuda()
+    imgs_torch = torch.cat([numpy2tensor(img) for img in imgs], dim=0)
     reshuffle_list = list(range(1,len(images)))+[0]
     
     results_dict = flow_model(images, images[reshuffle_list], attn_splits_list=[2], 
@@ -949,9 +1080,11 @@ def get_flow_and_interframe_paras(flow_model, imgs, visualize_pipeline=False):
     interattn_paras = {}
     interattn_paras['fwd_mappings'] = fwd_mappings
     interattn_paras['bwd_mappings'] = bwd_mappings
-    interattn_paras['interattn_masks'] = interattn_masks    
-
+    interattn_paras['interattn_masks'] = interattn_masks
     gc.collect()
     torch.cuda.empty_cache()
     
     return [fwd_flows, bwd_flows], [fwd_occs, bwd_occs], attn_mask, interattn_paras
+    
+  
+'''''

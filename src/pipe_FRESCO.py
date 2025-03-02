@@ -3,6 +3,7 @@ from src.flow_utils import warp_tensor
 import torch
 import torchvision
 import gc
+from gmflow.geometry import flow_warp
 
 """
 ==========================================================================
@@ -83,7 +84,7 @@ def inference(pipe, controlnet, frescoProc,
               cond_scale=[0.7]*20, num_inference_steps=20, num_warmup_steps=6, 
               do_classifier_free_guidance=True, seed=0, guidance_scale=7.5, use_controlnet=True,         
               record_latents=[], propagation_mode=False, visualize_pipeline=False, 
-              flows = None, occs = None, saliency=None, repeat_noise=False,
+              flows = None, occs = None, saliency=None, repeat_noise=False, mask=None,
               num_intraattn_steps = 1, step_interattn_end = 350, bg_smoothing_steps = [16,17]):
     """
     video-to-video translation inference pipeline with FRESCO
@@ -138,7 +139,7 @@ def inference(pipe, controlnet, frescoProc,
     noise_scheduler = pipe.scheduler 
     generator = torch.Generator(device=device).manual_seed(seed)
     B, C, H, W = imgs.shape
-    latents = pipe.prepare_latents(
+    latent_x0 = pipe.prepare_latents(
         B,
         pipe.unet.config.in_channels,
         H,
@@ -150,16 +151,19 @@ def inference(pipe, controlnet, frescoProc,
     )   
     
     if repeat_noise:
-        latents = latents[0:1].repeat(B,1,1,1).detach()
+        latent_x0 = latent_x0[0:1].repeat(B,1,1,1).detach()
         
     if num_warmup_steps < 0:
-        latents_init = latents.detach()
+        latents_init = latent_x0.detach()
         num_warmup_steps = 0
     else:
         # SDEdit, use the noisy latent of imges as the input rather than a pure gausssian noise
-        latent_x0 = pipe.vae.config.scaling_factor * pipe.vae.encode(imgs.to(pipe.unet.dtype)).latent_dist.sample()
-        latents_init = noise_scheduler.add_noise(latent_x0, latents, timesteps[num_warmup_steps]).detach()
+        latents = pipe.vae.config.scaling_factor * pipe.vae.encode(imgs.to(pipe.unet.dtype)).latent_dist.sample()
+        latents_init = noise_scheduler.add_noise(latents, latent_x0, timesteps[num_warmup_steps]).detach()
+        #latents_init = noise_scheduler.add_noise(latent_x0, latents, timesteps[num_warmup_steps]).detach()
 
+    bwd_flows = flows[1]
+    #bwd_flows = F.interpolate(bwd_flows[:-1], scale_factor=1./8.0, mode='bilinear')
     # SDEdit, run num_inference_steps-num_warmup_steps steps
     with pipe.progress_bar(total=num_inference_steps-num_warmup_steps) as progress_bar:
         latents = latents_init
@@ -168,6 +172,20 @@ def inference(pipe, controlnet, frescoProc,
             [HACK] control the steps to apply spatial/temporal-guided attention
             [HACK] record and restore latents from previous batch
             """
+            '''''
+            if t > 700:
+                image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample 
+                #wrap_image = flow_warp(image[0:-1].float(),bwd_flows[0:-1])
+                #wrap_image=wrap_image.permute(0,2,3,1)
+                replace_image=image[1:].permute(0,2,3,1)
+                for x in range(replace_image.shape[0]):
+                    wrap_image = flow_warp(image[x].unsqueeze(0).float(),bwd_flows[x].unsqueeze(0))
+                    wrap_image=wrap_image.permute(0,2,3,1)
+                    replace_image[x,mask[x]]=wrap_image[0,mask[x]].half()
+                #replace_image[mask[0:-1]]=wrap_image[mask[0:-1]].half()
+                image[1:]=replace_image.permute(0,3,1,2)
+                latents = pipe.vae.config.scaling_factor * pipe.vae.encode(image).latent_dist.sample()
+            '''''
             if i >= num_intraattn_steps:
                 frescoProc.controller.disable_intraattn()
             if t < step_interattn_end:
@@ -175,8 +193,11 @@ def inference(pipe, controlnet, frescoProc,
             if propagation_mode: # restore latent from previous batch and record latent of the current batch
                 latents[0:2] = record_latents[i].detach().clone()
                 record_latents[i] = latents[[0,len(latents)-1]].detach().clone()
+                #latents[0:1] = record_latents[i].detach().clone()
+                #record_latents[i] = latents[[len(latents)-1]].detach().clone()
             else: # frist batch, record_latents[0][t] = [x_1,t, x_{N,t}] 
                 record_latents += [latents[[0,len(latents)-1]].detach().clone()]
+                #record_latents += [latents[[len(latents)-1]].detach().clone()]
             
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -198,6 +219,12 @@ def inference(pipe, controlnet, frescoProc,
                 down_block_res_samples, mid_block_res_sample = None, None 
             
             # predict the noise residual
+            #print("ttttt=",t)
+            #if t < 600:
+            #    frescoProc.controller.disable_cfattn()
+            #else:
+            #    frescoProc.controller.enable_cfattn()
+
             noise_pred = pipe.unet(
                 latent_model_input,
                 t,
@@ -208,7 +235,7 @@ def inference(pipe, controlnet, frescoProc,
                 return_dict=False,
             )[0]
             
-            # perform guidance
+            # perform guidance 
             if do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -219,14 +246,83 @@ def inference(pipe, controlnet, frescoProc,
             Note: bg_smoothing_steps should be rescaled based on num_inference_steps
             current [16,17] is based on num_inference_steps=20
             """
+            '''''
+            print("tttt=",t)
+            noise_pred_copy = noise_pred.clone()
+            image = pipe.vae.decode(noise_pred_copy / pipe.vae.config.scaling_factor, return_dict=False)[0]
+            image = torch.clamp(image, -1 , 1)
+            save_imgs = tensor2numpy(image)
+            
+                
+            for ind in range(imgs.shape[0]):
+                Image.fromarray(save_imgs[ind]).save('./output/car-turn-18-crossatten/%04d+%02d.png'%(t,ind))
+            '''''
             if i + num_warmup_steps in bg_smoothing_steps:
-                latents = step(pipe, noise_pred, t, latents, generator, 
+                latents_all = step(pipe, noise_pred, t, latents, generator, 
                                visualize_pipeline=visualize_pipeline, 
-                               flows = flows, occs = occs, saliency=saliency)[0]  
-            else:
-                latents = step(pipe, noise_pred, t, latents, generator, 
-                           visualize_pipeline=visualize_pipeline)[0]                            
+                               flows = flows, occs = occs, saliency=saliency) 
+                #print("256.latents: ",latents)  
 
+                latents = latents_all[0]
+                
+                print("tttt=",t)
+                '''''
+                #latents_copy = latents.clone()
+                image = pipe.vae.decode(latents_all[1] / pipe.vae.config.scaling_factor, return_dict=False)[0]
+                image = torch.clamp(image, -1 , 1)
+                save_imgs = tensor2numpy(image)
+
+                
+                for ind in range(imgs.shape[0]):
+                    Image.fromarray(save_imgs[ind]).save('./output/car-turn-22-crossatten/%04d+%02d.png'%(t,ind))
+                '''''
+                
+            else:
+                latents_all = step(pipe, noise_pred, t, latents, generator, 
+                           visualize_pipeline=visualize_pipeline)
+                #print("256.latents: ",latents)  
+                latents = latents_all[0]
+
+                
+                print("tttttttt0=",t)
+                '''''
+                #latents_copy = latents.clone()
+                image = pipe.vae.decode(latents_all[1] / pipe.vae.config.scaling_factor, return_dict=False)[0]
+                image = torch.clamp(image, -1 , 1)
+                save_imgs = tensor2numpy(image)
+
+            
+                for ind in range(imgs.shape[0]):
+                    Image.fromarray(save_imgs[ind]).save('./output/car-turn-22-crossatten/%04d+%02d.png'%(t,ind))
+                '''''  
+            '''''
+            if t == 701:
+                latents_init = noise_scheduler.add_noise(latents_all[1], latent_x0, timesteps[num_warmup_steps+1]).detach()
+                #latents_init = noise_scheduler.add_noise(latent_x0, latents_all[0], timesteps[num_warmup_steps]).detach()
+                latents[1:]=latents_init[1:]
+                print("AAAAAA")
+            if t == 651:
+                latents_init = noise_scheduler.add_noise(latents_all[1], latent_x0, timesteps[num_warmup_steps+2]).detach()
+                #latents_init = noise_scheduler.add_noise(latent_x0, latents_all[0], timesteps[num_warmup_steps]).detach()
+                latents[1:]=latents_init[1:]
+                print("BBBBB")
+            if t == 601:
+                latents_init = noise_scheduler.add_noise(latents_all[1], latent_x0, timesteps[num_warmup_steps+3]).detach()
+                #latents_init = noise_scheduler.add_noise(latent_x0, latents_all[0], timesteps[num_warmup_steps]).detach()
+                latents[1:]=latents_init[1:]    
+                print("CCCCCC")
+            if t == 551:
+                latents_init = noise_scheduler.add_noise(latents_all[1], latent_x0, timesteps[num_warmup_steps+4]).detach()
+                #latents_init = noise_scheduler.add_noise(latent_x0, latents_all[0], timesteps[num_warmup_steps]).detach()
+                latents[1:]=latents_init[1:]    
+                print("CCCCCC")
+            if t == 501:
+                latents_init = noise_scheduler.add_noise(latents_all[1], latent_x0, timesteps[num_warmup_steps+5]).detach()
+                #latents_init = noise_scheduler.add_noise(latent_x0, latents_all[0], timesteps[num_warmup_steps]).detach()
+                latents[1:]=latents_init[1:]    
+                print("CCCCCC")
+            '''''
+            
             # call the callback, if provided
             if i == len(timesteps) - 1 or ((i + 1) > 0 and (i + 1) % pipe.scheduler.order == 0):
                 progress_bar.update()
