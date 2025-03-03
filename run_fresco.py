@@ -142,12 +142,12 @@ def run_keyframe_translation(config):
     os.makedirs(config['save_path']+'keys', exist_ok=True)
     os.makedirs(config['save_path']+'video', exist_ok=True)
     
-    #sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
-    #sublists[0].insert(0, keys[0])
-    #sublists[0].insert(1, keys[1])
+    sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
+    sublists[0].insert(0, keys[0])
+    sublists[0].insert(1, keys[1])
     #sublists = [[30,0,5,10,15,20,25,35],[40,45,50,55,60],[65,70,75]]
-    sublists = [[0,2,4,6,8,10,12,14],[16,18,20,22,24],[26,28,30]]
-    '''''
+    #sublists = [[0,2,4,6,8,10,12,14],[16,18,20,22,24],[26,28,30]]
+    
     if len(sublists) > 1 and len(sublists[-1]) < 3:
         add_num = 3 - len(sublists[-1])
         sublists[-1] = sublists[-2][-add_num:] + sublists[-1]
@@ -155,7 +155,7 @@ def run_keyframe_translation(config):
 
     if not sublists[-2]:
         del sublists[-2]
-    '''''
+    
     print('processing %d batches:\nkeyframe indexes'%(len(sublists)), sublists)    
 
     print('\n' + '=' * 100)
@@ -239,14 +239,14 @@ def run_keyframe_translation(config):
         * Turn off background smoothing: set saliency = None in apply_FRESCO_opt()
         '''    
         # Turn on all FRESCO support
-        #frescoProc.controller.enable_controller(interattn_paras=interattn_paras, attn_mask=attn_mask)
+        #frescoProc.controller.enable_controller(interattn_paras=interattn_paras, attn_mask=attn_mask,propagation_mode=propagation_mode)
         frescoProc.controller.disable_controller()
         #frescoProc.controller.enable_interattn(interattn_paras)
         #frescoProc.controller.enable_intraattn()
-        frescoProc.controller.enable_cfattn(attn_mask)
+        frescoProc.controller.enable_cfattn(attn_mask,propagation_mode)
         disable_FRESCO_opt(pipe)
         #apply_FRESCO_opt(pipe, steps = timesteps[:config['end_opt_step']],
-        #                flows = flows, occs = occs, correlation_matrix=[], 
+        #                flows = flows, occs = occs, correlation_matrix=correlation_matrix, 
         #                saliency=saliency, optimize_temporal = True)
         
         gc.collect()

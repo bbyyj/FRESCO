@@ -220,7 +220,7 @@ def inference(pipe, controlnet, frescoProc,
             
             # predict the noise residual
             #print("ttttt=",t)
-            #if t < 600:
+            #if t < 400:
             #    frescoProc.controller.disable_cfattn()
             #else:
             #    frescoProc.controller.enable_cfattn()

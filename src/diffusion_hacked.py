@@ -8,6 +8,7 @@ from diffusers.models.unet_2d_condition import UNet2DConditionOutput
 from diffusers.models.attention_processor import AttnProcessor2_0
 from typing import Any, Dict, List, Optional, Tuple, Union
 import sys
+import random
 sys.path.append("./src/ebsynth/deps/gmflow/")
 from gmflow.geometry import flow_warp, forward_backward_consistency_check
 
@@ -40,7 +41,7 @@ class AttentionControl():
         self.intraattn_bias = 0
         self.intraattn_scale_factor = 0.2
         self.interattn_scale_factor = 0.2
-        self.bwd_flows_all=None
+        self.propagation_mode=False
     
     @staticmethod
     def get_empty_store():
@@ -79,16 +80,16 @@ class AttentionControl():
         self.use_cfattn = False        
 
     # cross frame attention
-    def enable_cfattn(self, attn_mask=None,bwd_flows_all=None):
+    def enable_cfattn(self, attn_mask=None,propagation_mode=False):
         if attn_mask:
             if self.attn_mask:
                 del self.attn_mask
                 torch.cuda.empty_cache()
-            if self.bwd_flows_all:
-                del self.bwd_flows_all
+            if self.propagation_mode:
+                del self.propagation_mode
                 torch.cuda.empty_cache()
             self.attn_mask = attn_mask
-            self.bwd_flows_all=bwd_flows_all
+            self.propagation_mode=propagation_mode
             self.use_cfattn = True  
         else:
             if self.attn_mask:
@@ -120,10 +121,10 @@ class AttentionControl():
         self.disable_interattn()
         self.disable_cfattn()
     
-    def enable_controller(self, interattn_paras=None, attn_mask=None):
+    def enable_controller(self, interattn_paras=None, attn_mask=None,propagation_mode=False):
         self.enable_intraattn()
         self.enable_interattn(interattn_paras)
-        self.enable_cfattn(attn_mask)    
+        self.enable_cfattn(attn_mask,propagation_mode)    
     
     def forward(self, context):
         if self.store:
@@ -263,8 +264,21 @@ class FRESCOAttnProcessor2_0:
             value = rearrange(value_stacked, "b f d c -> (b f) d c").detach()
             key = rearrange(key_stacked, "b f d c -> (b f) d c").detach()
             '''''
-            
+            '''''
+            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
+            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
+            # 开始处理 f 维度的索引替换
+            for f in range(1, video_length):  # 从 f=1 开始，因为 f=0 没有前一帧
+                d = key.shape[2]
+                num_indices = d // video_length  # 计算要替换的索引数量
+                indices = random.sample(range(d), num_indices)  # 在 d 维度上随机选择索引
 
+                # 用前一帧的值替换当前帧的对应索引值
+                key[:, f, indices, :] = key[:, f - 1, indices, :]
+                value[:, f, indices, :] = value[:, f - 1, indices, :]
+            value = rearrange(value, "b f d c -> (b f) d c").detach()
+            key = rearrange(key, "b f d c -> (b f) d c").detach()
+            '''''
             
             if self.controller.attn_mask is not None:
                 for m in self.controller.attn_mask:
@@ -279,20 +293,43 @@ class FRESCOAttnProcessor2_0:
             if attn_mask is None:
                 key = key[:, former_frame_index]
             else:
+                attn_mask_0=attn_mask[:2]
+                key_0 = key[:,:2]
                 key=key[:, attn_mask]
+                key_0=key_0[:,attn_mask_0]
                 print('248.key.shape: ', key.shape)
-                key = repeat(key, "b d c -> b f d c", f=video_length)
+
+                if self.controller.propagation_mode:
+                    key = repeat(key, "b d c -> b f d c", f=video_length-2)
+                    key_0 = repeat(key_0, "b d c -> b f d c", f=2)
+                    key_0 = torch.nn.functional.pad(key_0, (0, 0, 0, key.shape[2]-key_0.shape[2]))
+                    key = torch.cat([key_0, key], dim=1)
+                else:
+                    key = repeat(key, "b d c -> b f d c", f=video_length)
                 print('250.key.shape: ', key.shape)
             # B * C * HW * 8D --> BC * HW * 8D 
             key = rearrange(key, "b f d c -> (b f) d c").detach()
+            #key_0 = rearrange(key_0, "b f d c -> (b f) d c").detach()
             value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
             if attn_mask is None:
                 value = value[:, former_frame_index]
             else:
-                value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length)              
+                value_0=value[:,:2]
+                if self.controller.propagation_mode:
+                    value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length-2)    
+                    value_0=repeat(value_0[:,attn_mask_0],"b d c -> b f d c",f=2)
+                    value_0 = torch.nn.functional.pad(value_0, (0, 0, 0, value.shape[2]-value_0.shape[2]))
+                    value = torch.cat([value_0, value], dim=1)
+                else:
+                    value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length)  
             value = rearrange(value, "b f d c -> (b f) d c").detach()
+            #value_0 = rearrange(value_0, "b f d c -> (b f) d c").detach()
+            #query=rearrange(query, "(b f) d c -> b f d c", f=video_length)
+            #query_0=query[:,:2]
+            #query=query[:,2:]
+            #query = rearrange(query, "b f d c -> (b f) d c").detach()
+            #query_0 = rearrange(query_0, "b f d c -> (b f) d c").detach()
             
-        
         # BC * HW * 8D --> BC * HW * 8 * D --> BC * 8 * HW * D
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         # BC * 8 * HW2 * D
