@@ -191,13 +191,13 @@ def inference(pipe, controlnet, frescoProc,
             if t < step_interattn_end:
                 frescoProc.controller.disable_interattn()
             if propagation_mode: # restore latent from previous batch and record latent of the current batch
-                latents[0:2] = record_latents[i].detach().clone()
-                record_latents[i] = latents[[0,len(latents)-1]].detach().clone()
-                #latents[0:1] = record_latents[i].detach().clone()
-                #record_latents[i] = latents[[len(latents)-1]].detach().clone()
+                #latents[0:2] = record_latents[i].detach().clone()
+                #record_latents[i] = latents[[0,len(latents)-1]].detach().clone()
+                latents[0:1] = record_latents[i].detach().clone()
+                record_latents[i] = latents[[0]].detach().clone()
             else: # frist batch, record_latents[0][t] = [x_1,t, x_{N,t}] 
-                record_latents += [latents[[0,len(latents)-1]].detach().clone()]
-                #record_latents += [latents[[len(latents)-1]].detach().clone()]
+                #record_latents += [latents[[0,len(latents)-1]].detach().clone()]
+                record_latents += [latents[[0]].detach().clone()]
             
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
