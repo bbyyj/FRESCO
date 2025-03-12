@@ -44,7 +44,8 @@ class AttentionControl():
         self.intraattn_scale_factor = 0.2
         self.interattn_scale_factor = 0.2
         self.propagation_mode=False
-        self.global_tokens=None
+        self.global_tokens={}
+        self.timestep=None
         self.key_matching=None
     
     @staticmethod
@@ -84,7 +85,7 @@ class AttentionControl():
         self.use_cfattn = False        
 
     # cross frame attention
-    def enable_cfattn(self, attn_mask=None,propagation_mode=False,key_matching=None,global_tokens=None):
+    def enable_cfattn(self, attn_mask=None,propagation_mode=False,key_matching=None):
         if attn_mask:
             if self.attn_mask:
                 del self.attn_mask
@@ -95,13 +96,11 @@ class AttentionControl():
             if self.key_matching:
                 del self.key_matching
                 torch.cuda.empty_cache()
-            if self.global_tokens:
-                del self.global_tokens
-                torch.cuda.empty_cache()
+            
             self.attn_mask = attn_mask
             self.propagation_mode=propagation_mode
             self.key_matching = key_matching
-            self.global_tokens=global_tokens
+            
             self.use_cfattn = True  
         else:
             if self.attn_mask:
@@ -111,7 +110,10 @@ class AttentionControl():
                 self.disable_cfattn()       
     
     def update_global_tokens(self,global_tokens):
-        self.global_tokens=global_tokens
+        self.global_tokens[self.timestep]=global_tokens
+
+    def update_time(self,time):
+        self.timestep=time
     
     def disable_interattn(self):
         self.use_interattn = False
@@ -225,7 +227,7 @@ class FRESCOAttnProcessor2_0:
 
         query = attn.to_q(hidden_states)
         #print('204.query.shape: ', query.shape)
-        #print('204.hidden_states.shape: ',hidden_states.shape)
+        print('204.hidden_states.shape: ',hidden_states.shape)
 
         crossattn = False
         if encoder_hidden_states is None:
@@ -261,133 +263,10 @@ class FRESCOAttnProcessor2_0:
             former_frame_index = [0] * video_length
             attn_mask = []
             bwd_flows = []
-            '''''
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            key_0=key[:,0]
-            value_0=value[:,0]
-            res_encoder_hidden_states=rearrange(encoder_hidden_states, "(b f) d c -> b f d c", f=video_length)
-            res_encoder_hidden_states=res_encoder_hidden_states[:,1:]
-            res_encoder_hidden_states=rearrange(res_encoder_hidden_states, "b f d c -> (b f) d c")
-            encoder_hidden_states_pooled = F.avg_pool1d(res_encoder_hidden_states.transpose(1, 2), kernel_size=4, stride=4)
-            encoder_hidden_states_pooled = encoder_hidden_states_pooled.transpose(1, 2)
-            res_key=attn.to_k(encoder_hidden_states_pooled)
-            res_value=attn.to_v(encoder_hidden_states_pooled)
-            res_key = rearrange(res_key, "(b f) d c -> b f d c", f=video_length-1)
-            res_value = rearrange(res_value, "(b f) d c -> b f d c", f=video_length-1) 
-            res_key = rearrange(res_key, "b f d c -> b (f d) c")
-            res_value = rearrange(res_value, "b f d c -> b (f d) c")
-            print("res_key.shape: ",res_key.shape)
-            print("key_0.shape: ",key_0.shape)
-            key=torch.cat([key_0,res_key],dim=1)   
-            key = repeat(key, "b d c -> b f d c", f=video_length)
-            value=torch.cat([value_0,res_value],dim=1)   
-            value = repeat(value, "b d c -> b f d c", f=video_length)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            '''''
-            #tune-a-video
-            '''''
-            former_frame_index = torch.arange(video_length) - 1
-            former_frame_index[0] = 0
-
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            key = torch.cat([key[:, [0] * video_length], key[:, former_frame_index]], dim=2)
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            value = torch.cat([value[:, [0] * video_length], value[:, former_frame_index]], dim=2)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            '''''
-
-            # FFAM
-            '''''
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
             
-            key_list=[]
-            value_list=[]
-            for i in range(video_length):
-                key_i=key[:,i]
-                value_i=value[:,i]
-                res_encoder_hidden_states=rearrange(encoder_hidden_states, "(b f) d c -> b f d c", f=video_length)
-                res_encoder_hidden_states=torch.cat([res_encoder_hidden_states[:,0:i],res_encoder_hidden_states[:,i+1:],dim=1])
-                res_encoder_hidden_states=rearrange(res_encoder_hidden_states, "b f d c -> (b f) d c")
-                encoder_hidden_states_pooled = F.avg_pool1d(res_encoder_hidden_states.transpose(1, 2), kernel_size=4, stride=4)
-                encoder_hidden_states_pooled = encoder_hidden_states_pooled.transpose(1, 2)
-                res_key=attn.to_k(encoder_hidden_states_pooled)
-                res_value=attn.to_v(encoder_hidden_states_pooled)
-                res_key = rearrange(res_key, "(b f) d c -> b f d c", f=video_length-1)
-                res_value = rearrange(res_value, "(b f) d c -> b f d c", f=video_length-1) 
-                res_key = rearrange(res_key, "b f d c -> b (f d) c")
-                res_value = rearrange(res_value, "b f d c -> b (f d) c")
-                
-                key_=torch.cat([key_i,res_key],dim=1)   
-                key_=key_.unsqueeze(1)
-                key_list.append(key_)
-                value_=torch.cat([value_i,res_value],dim=1)  
-                value_=value_.unsqueeze(1) 
-                value_list.append(value_)
-            key=torch.cat(key_list,dim=1)
-            value=torch.cat(value_list,dim=1)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            '''''
-
-            #SimDA
-            '''''
-            x = encoder_hidden_states.reshape(encoder_hidden_states.size(0), int(math.sqrt(encoder_hidden_states.size(1))), int(math.sqrt(encoder_hidden_states.size(1))), encoder_hidden_states.size(-1))
-            # print(x.shape)
-            x = rearrange(x,'(b f) h w c -> b f h w c', f = video_length)
-            out = x.clone()
-            out[:,4:,0::4, 0::4,:] = torch.roll(x[:,:,0::4, 0::4,: ], shifts=4, dims=1)[:,4:,:, : ]
-            out[:,3:,0::4, 1::4,:] = torch.roll(x[:,:,0::4, 1::4,: ], shifts=3, dims=1)[:,3:,:, : ]
-            out[:,2:,0::4, 2::4,:] = torch.roll(x[:,:,0::4, 2::4,: ], shifts=2, dims=1)[:,2:,:, : ]
-            out[:,1:,0::4, 3::4,:] = torch.roll(x[:,:,0::4, 3::4,: ], shifts=1, dims=1)[:,1:,:, : ]
-
-            out[:,3:,1::4, 0::4,:] = torch.roll(x[:,:,1::4, 0::4,: ], shifts=3, dims=1)[:,3:,:, : ]
-            out[:,2:,1::4, 1::4,:] = torch.roll(x[:,:,1::4, 1::4,: ], shifts=2, dims=1)[:,2:,:, : ]
-            out[:,1:,1::4, 2::4,:] = torch.roll(x[:,:,1::4, 2::4,: ], shifts=1, dims=1)[:,1:,:, : ]
-            out[:,0:,1::4, 3::4,:] = torch.roll(x[:,:,1::4, 3::4,: ], shifts=0, dims=1)[:,0:,:, : ]
-
-            out[:,2:,2::4, 0::4,:] = torch.roll(x[:,:,2::4, 0::4,: ], shifts=2, dims=1)[:,2:,:, : ]
-            out[:,1:,2::4, 1::4,:] = torch.roll(x[:,:,2::4, 1::4,: ], shifts=1, dims=1)[:,1:,:, : ]
-            out[:,0:,2::4, 2::4,:] = torch.roll(x[:,:,2::4, 2::4,: ], shifts=0, dims=1)[:,0:,:, : ]
-            out[:,0:,2::4, 3::4,:] = torch.roll(x[:,:,2::4, 3::4,: ], shifts=0, dims=1)[:,0:,:, : ]
-
-            out[:,1:,3::4, 0::4,:] = torch.roll(x[:,:,3::4, 0::4,: ], shifts=1, dims=1)[:,1:,:, : ]
-            out[:,2:,3::4, 1::4,:] = torch.roll(x[:,:,3::4, 1::4,: ], shifts=2, dims=1)[:,2:,:, : ]
-            out[:,3:,3::4, 2::4,:] = torch.roll(x[:,:,3::4, 2::4,: ], shifts=3, dims=1)[:,3:,:, : ]
-            out[:,4:,3::4, 3::4,:] = torch.roll(x[:,:,3::4, 3::4,: ], shifts=4, dims=1)[:,4:,:, : ]
-            out = rearrange(out,'b f h w c -> (b f) h w c', f = video_length)
-            out = out.reshape(out.size(0), out.size(1)*out.size(2), out.size(-1))
-            #encoder_hidden_states = out
-
-            key = self.to_k(out)
-            value = self.to_v(out)
-            # print('key', key.shape)
-            # print('value', value.shape)
-
-            former_frame_index = torch.arange(video_length)  -1
-            former_frame_index[0] = 0
-
-            now_frame_index = torch.arange(video_length)
-
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            # # print('key_re', key.shape)
-            key = torch.cat([key[:, former_frame_index], key[:, now_frame_index]], dim=2)
-            # # print('key_cat', key.shape)
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            # # print('key_af', key.shape)
-
-
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            value = torch.cat([value[:, former_frame_index], value[:, now_frame_index]], dim=2)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            '''''
 
             #vidtome
-            '''''
+            
             _tome_info={
                 "size": None,
                 "hooks": [],
@@ -401,7 +280,7 @@ class FRESCOAttnProcessor2_0:
                 "global_merge_ratio": 0.8,
                 "local_merge_ratio": 0.9,
                 "global_rand": 0.5,
-                "target_stride": 4
+                "target_stride": 2
                 }
             }
             print("399.generator: ",self.generator)
@@ -409,292 +288,64 @@ class FRESCOAttnProcessor2_0:
                 self.generator=init_generator(encoder_hidden_states.device)
 
             #encoder_hidden_states = rearrange(encoder_hidden_states,"(b f) d c -> b f d c", f=video_length)
-            m_a, u_a, merged_tokens,global_tokens = compute_merge(
-                self.generator, self.controller.global_tokens,encoder_hidden_states, _tome_info)
+            m_a, u_a, merged_tokens = compute_merge(
+                self.generator, self.controller,encoder_hidden_states, _tome_info)
             encoder_hidden_states = merged_tokens
             #encoder_hidden_states = torch.cat([encoder_hidden_states]*2)
-            self.controller.update_global_tokens(global_tokens)
+            
             query = attn.to_q(encoder_hidden_states)
             key = attn.to_k(encoder_hidden_states)
             value = attn.to_v(encoder_hidden_states)
-            '''''
-
-
-            #fairy
-            '''''
-            key = rearrange(key, "(b f) d c -> b (f d) c", f=video_length)
-            key = repeat(key, "b d c -> b f d c", f=video_length)
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-
-            value = rearrange(value, "(b f) d c -> b (f d) c", f=video_length)
-            value = repeat(value, "b d c -> b f d c", f=video_length)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            '''''
-
-            #adaflow
-            size = f'{key.shape[1]}'
-            selected_indices = self.controller.key_matching[f'{size}']
-            key = rearrange(key, "(b f) d c -> b (f d) c", f=video_length)
-            key = torch.stack([key[:,selected_indices[i]] for i in range(video_length)], dim=1)
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            value = rearrange(value, "(b f) d c -> b (f d) c", f=video_length)
-            value = torch.stack([value[:,selected_indices[i]] for i in range(video_length)], dim=1)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-
-            #fatezero
+            print("418.query.shape: ",query.shape)
             
 
 
-            
-                
-
-
-            '''''
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            if self.controller.propagation_mode:
-                for i in range(2,video_length):
-                    key[:,i]=key[:,i-1]
-                key[:,1]=key[:,0]
-                for i in range(2,video_length):
-                    value[:,i]=value[:,i-1]
-                value[:,1]=value[:,0]
-                
-                key_0=key[:,0]
-                key_1=key[:,1]
-                value_0=value[:,0]
-                value_1=value[:,1]
-                key_0 = repeat(key_0, "b d c -> b f d c", f=2)
-                value_0 = repeat(value_0, "b d c -> b f d c", f=2)
-                key_1 = repeat(key_1, "b d c -> b f d c", f=video_length-2)
-                value_1 = repeat(value_1, "b d c -> b f d c", f=video_length-2)
-                key=torch.cat([key_0, key_1], dim=1)
-                value=torch.cat([value_0, value_1], dim=1)
-                
-            else:
-                key=key[:,0] # the first frame
-                value=value[:,0]
-                key = repeat(key, "b d c -> b f d c", f=video_length)
-                value = repeat(value, "b d c -> b f d c", f=video_length)
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            '''''
-            
-            # 只关注第一个帧
-            '''''
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            key_0=key[:,0] # the first frame
-            value_0=value[:,0]
-            key_0 = repeat(key_0, "b d c -> b f d c", f=video_length)
-            value_0 = repeat(value_0, "b d c -> b f d c", f=video_length)
-            #key_stacked = torch.cat([key_0, key], dim=2)
-            #value_stacked= torch.cat([value_0,value],dim=2)
-            value = rearrange(value_0, "b f d c -> (b f) d c").detach()
-            key = rearrange(key_0, "b f d c -> (b f) d c").detach()
-            '''''
-            
-            '''''
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            # 开始处理 f 维度的索引替换
-            for f in range(1, video_length):  # 从 f=1 开始，因为 f=0 没有前一帧
-                d = key.shape[2]
-                num_indices = d // video_length  # 计算要替换的索引数量
-                indices = random.sample(range(d), num_indices)  # 在 d 维度上随机选择索引
-
-                # 用前一帧的值替换当前帧的对应索引值
-                key[:, f, indices, :] = key[:, f - 1, indices, :]
-                value[:, f, indices, :] = value[:, f - 1, indices, :]
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            '''''
-            '''''
-            #FRESCO
-            if self.controller.attn_mask is not None:
-                for m in self.controller.attn_mask:
-                    print('236.m.shape: ', m.shape)
-                    if m.shape[1] == key.shape[1]:
-                        attn_mask = m
-            # BC * HW * 8D --> B * C * HW * 8D
-            key = rearrange(key, "(b f) d c -> b f d c", f=video_length)
-            print('241.key.shape: ', key.shape)
-            print('242.attn_mask.shape: ', attn_mask.shape)
-            # B * C * HW * 8D --> B * C * HW * 8D
-            if attn_mask is None:
-                key = key[:, former_frame_index]
-            else:
-                attn_mask_0=attn_mask[:2]
-                key_0 = key[:,:2]
-                key=key[:, attn_mask]
-                key_0=key_0[:,attn_mask_0]
-                print('248.key.shape: ', key.shape)
-
-                if self.controller.propagation_mode and False:
-                    key = repeat(key, "b d c -> b f d c", f=video_length-2)
-                    key_0 = repeat(key_0, "b d c -> b f d c", f=2)
-                    key_0 = torch.nn.functional.pad(key_0, (0, 0, 0, key.shape[2]-key_0.shape[2]))
-                    key = torch.cat([key_0, key], dim=1)
-                else:
-                    key = repeat(key, "b d c -> b f d c", f=video_length)
-                print('250.key.shape: ', key.shape)
-            # B * C * HW * 8D --> BC * HW * 8D 
-            key = rearrange(key, "b f d c -> (b f) d c").detach()
-            #key_0 = rearrange(key_0, "b f d c -> (b f) d c").detach()
-            value = rearrange(value, "(b f) d c -> b f d c", f=video_length)
-            if attn_mask is None:
-                value = value[:, former_frame_index]
-            else:
-                value_0=value[:,:2]
-                if self.controller.propagation_mode and False:
-                    value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length-2)    
-                    value_0=repeat(value_0[:,attn_mask_0],"b d c -> b f d c",f=2)
-                    value_0 = torch.nn.functional.pad(value_0, (0, 0, 0, value.shape[2]-value_0.shape[2]))
-                    value = torch.cat([value_0, value], dim=1)
-                else:
-                    value = repeat(value[:, attn_mask], "b d c -> b f d c", f=video_length)  
-            value = rearrange(value, "b f d c -> (b f) d c").detach()
-            #value_0 = rearrange(value_0, "b f d c -> (b f) d c").detach()
-            #query=rearrange(query, "(b f) d c -> b f d c", f=video_length)
-            #query_0=query[:,:2]
-            #query=query[:,2:]
-            #query = rearrange(query, "b f d c -> (b f) d c").detach()
-            #query_0 = rearrange(query_0, "b f d c -> (b f) d c").detach()
-            '''''
-        # BC * HW * 8D --> BC * HW * 8 * D --> BC * 8 * HW * D
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        # BC * 8 * HW2 * D
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        # BC * 8 * HW2 * D2
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+           
+        if self.controller and self.controller.use_cfattn and (not crossattn):
+            # BC * HW * 8D --> BC * HW * 8 * D --> BC * 8 * HW * D
+            query = query.view(int(batch_size/video_length), -1, attn.heads, head_dim).transpose(1, 2)
+            # BC * 8 * HW2 * D
+            key = key.view(int(batch_size/video_length), -1, attn.heads, head_dim).transpose(1, 2)
+            # BC * 8 * HW2 * D2
+            value = value.view(int(batch_size/video_length), -1, attn.heads, head_dim).transpose(1, 2)
+        else:
+            # BC * HW * 8D --> BC * HW * 8 * D --> BC * 8 * HW * D
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            # BC * 8 * HW2 * D
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            # BC * 8 * HW2 * D2
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)    
+            print("AAAAAAAAA")  
         
-        '''for spatial-guided intra-frame attention'''
-        if self.controller and self.controller.use_intraattn and (not crossattn): 
-            ref_hidden_states = self.controller(None)
-            assert ref_hidden_states.shape == encoder_hidden_states.shape
-            query_ = attn.to_q(ref_hidden_states)
-            key_ = attn.to_k(ref_hidden_states) 
-            
-            ''' 
-            # for xformers implementation 
-            if importlib.util.find_spec("xformers") is not None:
-                # BC * HW * 8D --> BC * HW * 8 * D
-                query_ = rearrange(query_, "b d (h c) -> b d h c", h=attn.heads)
-                key_ = rearrange(key_, "b d (h c) -> b d h c", h=attn.heads)
-                # BC * 8 * HW * D --> 8BC * HW * D
-                query = rearrange(query, "b h d c -> b d h c")
-                query = xformers.ops.memory_efficient_attention(
-                    query_, key_ * self.sattn_scale_factor, query, 
-                    attn_bias=torch.eye(query_.size(1), key_.size(1), 
-                    dtype=query.dtype, device=query.device) * self.bias_weight, op=None
-                )
-                query = rearrange(query, "b d h c -> b h d c").detach()
-            '''
-            # BC * 8 * HW * D
-            query_ = query_.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            key_ = key_.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-            query = F.scaled_dot_product_attention(
-                query_, key_ * self.controller.intraattn_scale_factor, query, 
-                attn_mask = torch.eye(query_.size(-2), key_.size(-2), 
-                                      dtype=query.dtype, device=query.device) * self.controller.intraattn_bias,
-            ).detach()
-            #print('intra: ', GPU.getGPUs()[1].memoryUsed)
-            del query_, key_
-            torch.cuda.empty_cache()
-        
-        '''
-        # for xformers implementation
-        if importlib.util.find_spec("xformers") is not None:
-            hidden_states = xformers.ops.memory_efficient_attention(
-                    rearrange(query, "b h d c -> b d h c"), rearrange(key, "b h d c -> b d h c"), 
-                    rearrange(value, "b h d c -> b d h c"), 
-                    attn_bias=attention_mask, op=None
-                )
-            hidden_states = rearrange(hidden_states, "b d h c -> b h d c", h=attn.heads)
-        '''
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
         # TODO: add support for attn.scale when we move to Torch 2.1
-        # output: BC * 8 * HW * D2      
+        # output: BC * 8 * HW * D2     
+        
         hidden_states = F.scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
-        # vidtome
-        '''
-        hidden_states = u_a(hidden_states)
-        '''
 
-        #print('cross: ', GPU.getGPUs()[1].memoryUsed)
+        if self.controller and self.controller.use_cfattn and (not crossattn):
+            hidden_states = hidden_states.transpose(1, 2).reshape(int(batch_size//video_length), -1, attn.heads * head_dim)
+        else:
+            hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         
-        '''for temporal-guided inter-frame attention (FLATTEN)'''
-        if self.controller and self.controller.use_interattn and (not crossattn):
-            del query, key, value
-            torch.cuda.empty_cache()
-            bwd_mapping = None
-            fwd_mapping = None
-            flattn_mask = None
-            for i, f in enumerate(self.controller.interattn_paras['fwd_mappings']):
-                if f.shape[2] == hidden_states.shape[2]:
-                    fwd_mapping = f
-                    bwd_mapping = self.controller.interattn_paras['bwd_mappings'][i]
-                    interattn_mask = self.controller.interattn_paras['interattn_masks'][i]
-            video_length = key_raw.size()[0] // self.unet_chunk_size
-            # BC * HW * 8D --> C * 8BD * HW
-            key = rearrange(key_raw, "(b f) d c -> f (b c) d", f=video_length)
-            query = rearrange(query_raw, "(b f) d c -> f (b c) d", f=video_length)
-            # BC * 8 * HW * D --> C * 8BD * HW
-            #key = rearrange(hidden_states, "(b f) h d c -> f (b h c) d", f=video_length) ########
-            #query = rearrange(hidden_states, "(b f) h d c -> f (b h c) d", f=video_length) #######
-            
-            value = rearrange(hidden_states, "(b f) h d c -> f (b h c) d", f=video_length)
-            key = torch.gather(key, 2, fwd_mapping.expand(-1,key.shape[1],-1))
-            query = torch.gather(query, 2, fwd_mapping.expand(-1,query.shape[1],-1))
-            value = torch.gather(value, 2, fwd_mapping.expand(-1,value.shape[1],-1))
-            # C * 8BD * HW --> BHW, C, 8D
-            key = rearrange(key, "f (b c) d -> (b d) f c", b=self.unet_chunk_size)
-            query = rearrange(query, "f (b c) d -> (b d) f c", b=self.unet_chunk_size)
-            value = rearrange(value, "f (b c) d -> (b d) f c", b=self.unet_chunk_size) 
-            '''
-            # for xformers implementation 
-            if importlib.util.find_spec("xformers") is not None:
-                # BHW * C * 8D --> BHW * C * 8 * D
-                query = rearrange(query, "b d (h c) -> b d h c", h=attn.heads)
-                key = rearrange(key, "b d (h c) -> b d h c", h=attn.heads)
-                value = rearrange(value, "b d (h c) -> b d h c", h=attn.heads)
-                B, D, C, _ = flattn_mask.shape
-                C1 = int(np.ceil(C / 4) * 4)
-                attn_bias = torch.zeros(B, D, C, C1, dtype=value.dtype, device=value.device) # HW * 1 * C * C
-                attn_bias[:,:,:,:C].masked_fill_(interattn_mask.logical_not(), float("-inf")) # BHW * C * C
-                hidden_states_ = xformers.ops.memory_efficient_attention(
-                    query, key * self.controller.interattn_scale_factor, value, 
-                    attn_bias=attn_bias.squeeze(1).repeat(self.unet_chunk_size*attn.heads,1,1)[:,:,:C], op=None
-                )
-                hidden_states_ = rearrange(hidden_states_, "b d h c -> b h d c", h=attn.heads).detach()
-            '''
-            # BHW * C * 8D --> BHW * C * 8 * D--> BHW * 8 * C * D
-            query = query.view(-1, video_length, attn.heads, head_dim).transpose(1, 2).detach()
-            key = key.view(-1, video_length, attn.heads, head_dim).transpose(1, 2).detach()
-            value = value.view(-1, video_length, attn.heads, head_dim).transpose(1, 2).detach()
-            hidden_states_ = F.scaled_dot_product_attention(
-                query, key * self.controller.interattn_scale_factor, value, 
-                attn_mask = (interattn_mask.repeat(self.unet_chunk_size,1,1,1))#.to(query.dtype)-1.0) * 1e6 -
-                #torch.eye(interattn_mask.shape[2]).to(query.device).to(query.dtype) * 1e4,
-            )
-                
-            # BHW * 8 * C * D --> C * 8BD * HW
-            hidden_states_ = rearrange(hidden_states_, "(b d) h f c -> f (b h c) d", b=self.unet_chunk_size)
-            hidden_states_ = torch.gather(hidden_states_, 2, bwd_mapping.expand(-1,hidden_states_.shape[1],-1)).detach()
-            # C * 8BD * HW --> BC * 8 * HW * D
-            hidden_states = rearrange(hidden_states_, "f (b h c) d -> (b f) h d c", b=self.unet_chunk_size, h=attn.heads)
-            #print('inter: ', GPU.getGPUs()[1].memoryUsed)
             
         # BC * 8 * HW * D --> BC * HW * 8D
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        
         hidden_states = hidden_states.to(query.dtype) 
 
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
+
+        # vidtome
+        if self.controller and self.controller.use_cfattn and (not crossattn):
+            #hidden_states=hidden_states.transpose(1,2)
+            #hidden_states=rearrange(hidden_states,"b d h c -> b d (h c)")
+            hidden_states = u_a(hidden_states)
+            print("332.vidtome.hidden_states.shape: ",hidden_states.shape)
 
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
@@ -729,7 +380,7 @@ class FRESCOAttnProcessor2_0:
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         )
 '''
-
+'''
 def apply_FRESCO_attn(pipe):
     """
     Apply FRESCO-guided attention to a StableDiffusionPipeline
@@ -744,6 +395,39 @@ def apply_FRESCO_attn(pipe):
             attn_processor_dict[k] = attnProc
     pipe.unet.set_attn_processor(attn_processor_dict)
     return frescoProc
+'''
+def apply_FRESCO_attn(pipe):
+    """
+    Apply FRESCO-guided attention to a StableDiffusionPipeline
+    """    
+    '''
+    elif k.startswith("up_blocks.3"):
+        attn_processor_dict[k] = frescoProc_2
+    elif k.startswith("down_blocks.0"):
+        attn_processor_dict[k] = frescoProc_3
+    elif k.startswith("down_blocks.1"):
+        attn_processor_dict[k] = frescoProc_4
+    '''
+    frescoProc_1 = FRESCOAttnProcessor2_0(2, AttentionControl())
+    frescoProc_2 = FRESCOAttnProcessor2_0(2, AttentionControl())
+    frescoProc_3 = FRESCOAttnProcessor2_0(2, AttentionControl())
+    frescoProc_4 = FRESCOAttnProcessor2_0(2, AttentionControl())
+    attnProc = AttnProcessor2_0()
+    attn_processor_dict = {}
+    #print(list(pipe.unet.attn_processors.keys()))
+    for k in pipe.unet.attn_processors.keys():
+        if k.startswith("up_blocks.3"):
+            attn_processor_dict[k] = frescoProc_1
+        elif k.startswith("down_blocks.0"):
+            attn_processor_dict[k] = frescoProc_2
+        elif k.startswith("down_blocks.0"):
+            attn_processor_dict[k] = frescoProc_3
+        elif k.startswith("down_blocks.1"):
+            attn_processor_dict[k] = frescoProc_4
+        else:
+            attn_processor_dict[k] = attnProc
+    pipe.unet.set_attn_processor(attn_processor_dict)
+    return [frescoProc_1,frescoProc_2,frescoProc_3,frescoProc_4]
     
 
 """

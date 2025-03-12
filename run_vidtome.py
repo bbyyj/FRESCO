@@ -16,9 +16,9 @@ from diffusers import StableDiffusionPipeline, AutoencoderKL, DDPMScheduler, Con
 
 from src.utils import *
 from src.keyframe_selection import get_keyframe_ind
-from src.diffusion_hacked import apply_FRESCO_attn, apply_FRESCO_opt, disable_FRESCO_opt
-from src.diffusion_hacked import get_flow_and_interframe_paras, get_intraframe_paras
-from src.pipe_FRESCO import inference
+from src.diffusion_hacked_vidtome import apply_FRESCO_attn, apply_FRESCO_opt, disable_FRESCO_opt
+from src.diffusion_hacked_vidtome import get_flow_and_interframe_paras, get_intraframe_paras
+from src.pipe_vidtome import inference
 from src.adaflow.match import prepare_dift_matching
 
 
@@ -89,7 +89,10 @@ def get_models(config):
         apply_freeu(pipe, b1=1.2, b2=1.5, s1=1.0, s2=1.0)
 
     frescoProc = apply_FRESCO_attn(pipe)
-    frescoProc.controller.disable_controller()
+    #frescoProc.controller.disable_controller()
+    for x in frescoProc:
+        x.controller.disable_controller()
+    
     apply_FRESCO_opt(pipe)
     print('create diffusion model ' + config['sd_path'] + ' successfully!')
     
@@ -147,14 +150,14 @@ def run_keyframe_translation(config):
     os.makedirs(config['save_path']+'keys', exist_ok=True)
     os.makedirs(config['save_path']+'video', exist_ok=True)
     
-    sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
-    sublists[0].insert(0, keys[0])
-    sublists[0].insert(1, keys[1])
+    #sublists = [keys[i:i+config['batch_size']-2] for i in range(2, len(keys), config['batch_size']-2)]
+    #sublists[0].insert(0, keys[0])
+    #sublists[0].insert(1, keys[1])
     #sublists = [[45,0,5,10,15,20,25,30],[35,40,50,55,60],[65,70,75]]
     #sublists = [[40,30,35,45],[50,55,60],[65,70,75]]
-    #sublists =[[0,5,10,15,20,25,30,35],[40,45,50,55,60],[65,70,75]]
+    sublists =[[0,5,10,15,20,25,30,35],[40,45,50,55,60],[65,70,75]]
     
-    
+    '''
     if len(sublists) > 1 and len(sublists[-1]) < 3:
         add_num = 3 - len(sublists[-1])
         sublists[-1] = sublists[-2][-add_num:] + sublists[-1]
@@ -162,7 +165,7 @@ def run_keyframe_translation(config):
 
     if not sublists[-2]:
         del sublists[-2]
-    
+    '''
     print('processing %d batches:\nkeyframe indexes'%(len(sublists)), sublists)    
 
     print('\n' + '=' * 100)
@@ -210,9 +213,11 @@ def run_keyframe_translation(config):
         batch_size = len(imgs)
         n_prompts = [n_prompt] * len(imgs)
         prompts = [base_prompt + a_prompt + extra_prompts[ind] for ind in sublists[batch_ind]]
+        '''
         if propagation_mode: # restore the extra_prompts from previous batch
             assert len(imgs) == len(sublists[batch_ind]) + 1
             prompts = ref_prompt + prompts
+        '''
         
         prompt_embeds = pipe._encode_prompt(
             prompts,
@@ -236,10 +241,10 @@ def run_keyframe_translation(config):
         # prepare parameters for inter-frame and intra-frame consistency
         #fresco
         flows, occs, attn_mask,interattn_paras,mask = get_flow_and_interframe_paras(flow_model, imgs)
-        correlation_matrix = get_intraframe_paras(pipe, imgs_torch, frescoProc, 
-                            prompt_embeds, seed = config['seed'])
+        #correlation_matrix = get_intraframe_paras(pipe, imgs_torch, frescoProc, 
+        #                    prompt_embeds, seed = config['seed'])
         # adaflow
-        key_matching = prepare_dift_matching(config['sd_path'],imgs)
+        #key_matching = prepare_dift_matching(config['sd_path'],imgs)
     
         '''
         Flexible settings for attention:
@@ -259,10 +264,14 @@ def run_keyframe_translation(config):
         '''    
         # Turn on all FRESCO support
         #frescoProc.controller.enable_controller(interattn_paras=interattn_paras, attn_mask=attn_mask,propagation_mode=propagation_mode)
-        frescoProc.controller.disable_controller()
+        #frescoProc.controller.disable_controller()
+        for x in frescoProc:
+            x.controller.disable_controller()
         #frescoProc.controller.enable_interattn(interattn_paras)
         #frescoProc.controller.enable_intraattn()
-        frescoProc.controller.enable_cfattn(attn_mask,propagation_mode,key_matching)
+        #frescoProc.controller.enable_cfattn(attn_mask,propagation_mode,key_matching)
+        for x in frescoProc:
+            x.controller.enable_cfattn(attn_mask,propagation_mode)
         disable_FRESCO_opt(pipe)
         #apply_FRESCO_opt(pipe, steps = timesteps[:config['end_opt_step']],
         #                flows = flows, occs = occs, correlation_matrix=correlation_matrix, 
@@ -285,7 +294,7 @@ def run_keyframe_translation(config):
             image = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
             image = torch.clamp(image, -1 , 1)
             save_imgs = tensor2numpy(image)
-            bias = 1 if propagation_mode else 0
+            bias = 0 if propagation_mode else 0
             for ind, num in enumerate(sublists[batch_ind]):
                 Image.fromarray(save_imgs[ind+bias]).save(os.path.join(config['save_path'], 'keys/%04d.png'%(num)))
                 
@@ -294,8 +303,8 @@ def run_keyframe_translation(config):
         
         batch_ind += 1
         # current batch uses the last frame of the previous batch as ref
-        ref_prompt= [prompts[0]]
-        imgs = [imgs[0]]
+        ref_prompt= []
+        imgs = []
         propagation_mode = batch_ind > 0
         if batch_ind == len(sublists):
             gc.collect()

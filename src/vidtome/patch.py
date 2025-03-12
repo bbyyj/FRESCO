@@ -11,7 +11,7 @@ from . import merge
 from .utils import isinstance_str, init_generator, join_frame, split_frame, func_warper, join_warper, split_warper
 
 
-def compute_merge(generator: torch.Generator, global_tokens:torch.Tensor,x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable, ...]:
+def compute_merge(generator: torch.Generator, controller,x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable, ...]:
     #original_h, original_w = tome_info["size"]
     #original_tokens = original_h * original_w
     #downsample = int(math.ceil(math.sqrt(original_tokens // x.shape[1])))
@@ -57,7 +57,8 @@ def compute_merge(generator: torch.Generator, global_tokens:torch.Tensor,x: torc
         
         # Global Token Merging!
         if args["merge_global"]:
-            if global_tokens is not None:
+            if controller.timestep in controller.global_tokens:
+                global_tokens=controller.global_tokens[controller.timestep].clone()
                 # Merge local tokens with global tokens. Randomly determine merging destination.
                 if torch.rand(1, generator=generator, device=generator.device) > args["global_rand"]:
                     src_len = local_tokens.shape[1]
@@ -78,8 +79,10 @@ def compute_merge(generator: torch.Generator, global_tokens:torch.Tensor,x: torc
 
                 # Update global tokens with unmerged local tokens. There should be a better way to do this.
                 global_tokens = u(merged_tokens).detach().clone().cpu()
+                controller.update_global_tokens(global_tokens)
             else:
                 global_tokens = local_tokens.detach().clone().cpu()
+                controller.update_global_tokens(global_tokens)
 
         m = func_warper(m_ls)
         u = func_warper(u_ls[::-1])
@@ -88,7 +91,7 @@ def compute_merge(generator: torch.Generator, global_tokens:torch.Tensor,x: torc
         merged_tokens = x
 
     # Return merge op, unmerge op, and merged tokens.
-    return m, u, merged_tokens,torch.Tensor
+    return m, u, merged_tokens
 
 
 def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]:
